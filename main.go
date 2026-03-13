@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 )
+
+const tracklistName = ".tracklist.json"
 
 func main() {
 	url := flag.String("url", "", "youtube video/playlist url to download")
@@ -36,17 +40,27 @@ func run(url, dir, rm string) error {
 		return nil
 	}
 
+	if url == "" {
+		flag.Usage()
+		return nil
+	}
+
 	seen, err := BuildSet(dir)
 	if err != nil {
 		return err
 	}
 
-	urls, err := ParseURL(url)
+	tl, err := ReadTracklist(dir)
 	if err != nil {
 		return err
 	}
 
-	if err := updateTool(); err != nil {
+	if err = updateTool(); err != nil {
+		return err
+	}
+
+	urls, err := ParseURL(url)
+	if err != nil {
 		return err
 	}
 
@@ -60,14 +74,14 @@ func run(url, dir, rm string) error {
 			continue
 		}
 
+		if _, ok := tl.Removed[id]; ok {
+			continue
+		}
+
 		_, err = DownloadOne(u, dir)
 		if err != nil {
 			return err
 		}
-	}
-
-	if err := RecordEntries(dir); err != nil {
-		return err
 	}
 	return nil
 }
@@ -90,7 +104,6 @@ func DownloadOne(url, dir string) (string, error) {
 	}
 	defer os.RemoveAll(workDir)
 
-	fmt.Fprintf(os.Stderr, "Downloading from %s", url)
 	cmd := exec.Command(
 		"yt-dlp", "-f", "bestaudio[ext=m4a]/bestaudio", "--audio-format", "m4a",
 		"--postprocessor-args", "ffmpeg:-c:a aac -b:a 256k",
@@ -98,10 +111,11 @@ func DownloadOne(url, dir string) (string, error) {
 		"-o", filepath.Join(workDir, "%(title)s [%(id)s].%(ext)s"),
 		url,
 	)
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	cmd.Stdout = os.Stdout
 	if err = cmd.Run(); err != nil {
-		return "", err
+		return "", fmt.Errorf("download failed: %s\n%s", err, stderr.String())
 	}
 
 	entr, err := os.ReadDir(workDir)
@@ -156,12 +170,12 @@ func updateTool() error {
 		return fmt.Errorf("failed to find yt-dlp in PATH: %s", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "updating yt-dlp...")
 	cmd := exec.Command("brew", "upgrade", "yt-dlp")
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to upgrade yt-dlp:\n%s\n%s", out, err)
+	cmd.Stdout = os.Stdout
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to upgrade yt-dlp: %s\n%s", err, stderr.String())
 	}
 	return nil
 }
@@ -173,6 +187,7 @@ func ParseURL(url string) ([]string, error) {
 		if err != nil {
 			return out, err
 		}
+		return out, nil
 	}
 	return []string{url}, nil
 }
@@ -215,26 +230,33 @@ func idToURL(id string) string {
 	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", id)
 }
 
-// RecordEntries records ids of present files to a .json tracklist file.
-// Returns map of seen and errors
-func RecordEntries(dir string) error {
-	seen, err := BuildSet(dir)
-	if err != nil {
-		return err
-	}
-
-	js, err := json.Marshal(seen)
-	if err != nil {
-		return err
-	}
-
-	filename := filepath.Join(dir, ".tracklist.json")
-	return os.WriteFile(filename, js, 0o644)
+// Tracklist represents the fields of the tracklist
+// The tracklist doesn't need to keep a list of existing ids. The directory should be the authority on that.
+type Tracklist struct {
+	Removed map[string]struct{} `json:"removed"`
 }
 
-// RemoveEntry removes an entry from the tracklist file
+// ReadTracklist reads the tracklist file if it exists to get a set of removed ids
+func ReadTracklist(dir string) (Tracklist, error) {
+	tl := Tracklist{Removed: map[string]struct{}{}}
+	b, err := os.ReadFile(filepath.Join(dir, tracklistName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tl, nil
+		}
+		return tl, err
+	}
+
+	if err := json.Unmarshal(b, &tl); err != nil {
+		return tl, err
+	}
+	return tl, nil
+}
+
+// RemoveEntry removes an entry from the tracklist file.
+// Adds it to Tracklist.Removed, so it doesn't get downloaded again.
 func RemoveEntry(dir, entry string) error {
-	seen, err := BuildSet(dir)
+	tl, err := ReadTracklist(dir)
 	if err != nil {
 		return err
 	}
@@ -244,23 +266,21 @@ func RemoveEntry(dir, entry string) error {
 		return err
 	}
 
-	delete(seen, id)
-	js, err := json.Marshal(seen)
+	tl.Removed[id] = struct{}{}
+	js, err := json.Marshal(tl)
 	if err != nil {
+		return err
+	}
+
+	filename := filepath.Join(dir, tracklistName)
+	if err := os.WriteFile(filename, js, 0o644); err != nil {
 		return err
 	}
 
 	if err := os.Remove(filepath.Join(dir, entry)); err != nil {
 		return err
 	}
-	filename := filepath.Join(dir, ".tracklist.json")
-	if err := os.WriteFile(filename, js, 0o644); err != nil {
-		return err
-	}
 
-	fmt.Printf("Removed: %s", entry)
+	fmt.Printf("Removed: %s\n", entry)
 	return nil
 }
-
-// TODO: add sync function
-// SyncEntries compares tracklist and dir entries. Returns slice of missing ids
