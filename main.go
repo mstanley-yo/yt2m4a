@@ -64,6 +64,7 @@ func run(url, dir, rm string) error {
 		return err
 	}
 
+	errs := []error{}
 	for _, u := range urls {
 		id, err := urlToID(u)
 		if err != nil {
@@ -80,8 +81,12 @@ func run(url, dir, rm string) error {
 
 		_, err = DownloadOne(u, dir)
 		if err != nil {
-			return err
+			errs = append(errs, err)
 		}
+	}
+
+	if errs != nil {
+		return fmt.Errorf("completed with %d errors:\n%s", len(errs), errors.Join(errs...))
 	}
 	return nil
 }
@@ -104,6 +109,7 @@ func DownloadOne(url, dir string) (string, error) {
 	}
 	defer os.RemoveAll(workDir)
 
+	fmt.Printf("downloading %s...\n", url)
 	cmd := exec.Command(
 		"yt-dlp", "-f", "bestaudio[ext=m4a]/bestaudio", "--audio-format", "m4a",
 		"--postprocessor-args", "ffmpeg:-c:a aac -b:a 256k",
@@ -115,7 +121,7 @@ func DownloadOne(url, dir string) (string, error) {
 	cmd.Stderr = &stderr
 	cmd.Stdout = os.Stdout
 	if err = cmd.Run(); err != nil {
-		return "", fmt.Errorf("download failed: %s\n%s", err, stderr.String())
+		return "", fmt.Errorf("failed to download %s: %s", url, stderr.String())
 	}
 
 	entr, err := os.ReadDir(workDir)
@@ -170,6 +176,7 @@ func updateTool() error {
 		return fmt.Errorf("failed to find yt-dlp in PATH: %s", err)
 	}
 
+	fmt.Println("updating yt-dlp...")
 	cmd := exec.Command("brew", "upgrade", "yt-dlp")
 	cmd.Stdout = os.Stdout
 	var stderr bytes.Buffer
