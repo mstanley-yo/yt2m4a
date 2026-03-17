@@ -17,7 +17,8 @@ const tracklistName = ".tracklist.json"
 
 func main() {
 	url := flag.String("url", "", "youtube video/playlist url to download")
-	rm := flag.String("rm", "", "remove downloaded file from directory and tracklist")
+	rm := flag.String("rm", "", "remove downloaded file from directory and add to blacklist")
+	force := flag.Bool("f", false, "force download url, removing from blacklist")
 	flag.Parse()
 
 	wd, err := os.Getwd()
@@ -26,17 +27,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(*url, wd, *rm); err != nil {
+	if err := run(*url, wd, *rm, *force); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(url, dir, rm string) error {
+func run(url, dir, rm string, force bool) error {
 	if rm != "" {
+		id, err := entryToID(rm)
+		if err != nil {
+			return err
+		}
+
+		if err := AddBlacklist(dir, id); err != nil {
+			return err
+		}
+
 		if err := RemoveEntry(dir, rm); err != nil {
 			return err
 		}
+
 		return nil
 	}
 
@@ -64,18 +75,24 @@ func run(url, dir, rm string) error {
 		return err
 	}
 
-	errs := []error{}
+	var errs []error
 	for _, u := range urls {
 		id, err := urlToID(u)
 		if err != nil {
 			return err
 		}
 
+		if force {
+			if err = RemoveBlacklist(dir, id); err != nil {
+				return err
+			}
+		}
+
 		if _, ok := seen[id]; ok {
 			continue
 		}
 
-		if _, ok := tl.Removed[id]; ok {
+		if _, ok := tl.Removed[id]; ok && !force {
 			continue
 		}
 
@@ -235,59 +252,4 @@ func ParsePlaylist(url string) ([]string, error) {
 
 func idToURL(id string) string {
 	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", id)
-}
-
-// Tracklist represents the fields of the tracklist
-// The tracklist doesn't need to keep a list of existing ids. The directory should be the authority on that.
-type Tracklist struct {
-	Removed map[string]struct{} `json:"removed"`
-}
-
-// ReadTracklist reads the tracklist file if it exists to get a set of removed ids
-func ReadTracklist(dir string) (Tracklist, error) {
-	tl := Tracklist{Removed: map[string]struct{}{}}
-	b, err := os.ReadFile(filepath.Join(dir, tracklistName))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return tl, nil
-		}
-		return tl, err
-	}
-
-	if err := json.Unmarshal(b, &tl); err != nil {
-		return tl, err
-	}
-	return tl, nil
-}
-
-// RemoveEntry removes an entry from the tracklist file.
-// Adds it to Tracklist.Removed, so it doesn't get downloaded again.
-func RemoveEntry(dir, entry string) error {
-	tl, err := ReadTracklist(dir)
-	if err != nil {
-		return err
-	}
-
-	id, err := entryToID(entry)
-	if err != nil {
-		return err
-	}
-
-	tl.Removed[id] = struct{}{}
-	js, err := json.Marshal(tl)
-	if err != nil {
-		return err
-	}
-
-	filename := filepath.Join(dir, tracklistName)
-	if err := os.WriteFile(filename, js, 0o644); err != nil {
-		return err
-	}
-
-	if err := os.Remove(filepath.Join(dir, entry)); err != nil {
-		return err
-	}
-
-	fmt.Printf("Removed: %s\n", entry)
-	return nil
 }

@@ -156,29 +156,31 @@ func TestEntries(t *testing.T) {
 		if err == nil || !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s exists in %s, expected it to be deleted", fileName, testDir)
 		}
+	})
+
+	t.Run("TestAddBlacklist", func(t *testing.T) {
+		id, err := entryToID(fileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err = AddBlacklist(testDir, id); err != nil {
+			t.Fatal(err)
+		}
 
 		b, err := os.ReadFile(filepath.Join(testDir, tracklistName))
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var got Tracklist
 		if err := json.Unmarshal(b, &got); err != nil {
 			t.Fatal(err)
 		}
+
 		want := Tracklist{Removed: map[string]struct{}{"wpXmmMtPLIE": {}}}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %v; want %v", got, want)
-		}
-	})
-
-	t.Run("TestRemovedDownload", func(t *testing.T) {
-		if err := run(testURL, testDir, ""); err != nil {
-			t.Fatal(err)
-		}
-
-		_, err := os.ReadFile(filepath.Join(testDir, fileName))
-		if err == nil || !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s exists in %s, expected it to be skipped", fileName, testDir)
 		}
 	})
 
@@ -188,8 +190,9 @@ func TestEntries(t *testing.T) {
 }
 
 func TestRun(t *testing.T) {
+	// TestDownloadWatch tests for whether the tool can download a single youtube link
 	t.Run("TestDownloadWatch", func(t *testing.T) {
-		if err := run(testURL, testDir, ""); err != nil {
+		if err := run(testURL, testDir, "", false); err != nil {
 			t.Fatal(err)
 		}
 
@@ -201,11 +204,8 @@ func TestRun(t *testing.T) {
 		if err != nil {
 			t.Fatalf("could not read golden file: %s", err)
 		}
-
 		if !bytes.Equal(expected, result) {
-			t.Logf("golden:\n%s\n", expected)
-			t.Logf("result:\n%s\n", result)
-			t.Error("Result content does not match golden file")
+			t.Errorf("result content does not match golden file:\ngolden:\n%s\nresult:\n%s\n", expected, result)
 		}
 	})
 
@@ -213,8 +213,9 @@ func TestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// TestDownloadWatch test for whether the tool can download a youtube playlist
 	t.Run("TestDownloadPlaylist", func(t *testing.T) {
-		if err := run(testPlaylistURL, testDir, ""); err != nil {
+		if err := run(testPlaylistURL, testDir, "", false); err != nil {
 			t.Fatal(err)
 		}
 
@@ -226,16 +227,14 @@ func TestRun(t *testing.T) {
 		if err != nil {
 			t.Fatalf("could not read golden file: %s", err)
 		}
-
 		if !bytes.Equal(expected, result) {
-			t.Logf("golden:\n%s\n", expected)
-			t.Logf("result:\n%s\n", result)
-			t.Error("Result content does not match golden file")
+			t.Errorf("result content does not match golden file:\ngolden:\n%s\nresult:\n%s\n", expected, result)
 		}
 	})
 
+	// TestRemoveFile tests for whether the rm flag can remove an existing file
 	t.Run("TestRemoveFile", func(t *testing.T) {
-		if err := run("", testDir, fileName); err != nil {
+		if err := run("", testDir, fileName, false); err != nil {
 			t.Fatal(err)
 		}
 
@@ -245,6 +244,7 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	// TestRemoveTracklist tests for whether the rm flag adds the id of the removed file to the blacklist
 	t.Run("TestRemoveTracklist", func(t *testing.T) {
 		f, err := os.ReadFile(filepath.Join(testDir, ".tracklist.json"))
 		if err != nil {
@@ -259,5 +259,56 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	os.Remove(filepath.Join(testDir, ".tracklist.json"))
+	// TestRemovedDownload tests for whether the blacklist correctly prevents future downloads
+	t.Run("TestRemovedDownload", func(t *testing.T) {
+		if err := run(testURL, testDir, "", false); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := os.ReadFile(filepath.Join(testDir, fileName))
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s exists in %s, expected it to be skipped", fileName, testDir)
+		}
+	})
+
+	// TestForceDownload tests for whether the force flag can force downloads even when in blacklist
+	t.Run("TestForceDownload", func(t *testing.T) {
+		if err := run(testURL, testDir, "", true); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := os.ReadFile(filepath.Join(testDir, fileName))
+		if err != nil {
+			t.Fatalf("could not read result file: %s", err)
+		}
+		expected, err := os.ReadFile(filepath.Join(goldenDir, fileName))
+		if err != nil {
+			t.Fatalf("could not read golden file: %s", err)
+		}
+		if !bytes.Equal(expected, result) {
+			t.Errorf("result content does not match golden file:\ngolden:\n%s\nresult:\n%s\n", expected, result)
+		}
+	})
+
+	// TestForceTracklist test for whether the force flag correctly removes ids from the blacklist
+	t.Run("TestForceTracklist", func(t *testing.T) {
+		f, err := os.ReadFile(filepath.Join(testDir, ".tracklist.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var got Tracklist
+		json.Unmarshal(f, &got)
+		want := Tracklist{Removed: map[string]struct{}{}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got: %v, but expected %v", got, want)
+		}
+	})
+
+	if err := os.Remove(filepath.Join(testDir, fileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(testDir, ".tracklist.json")); err != nil {
+		t.Fatal(err)
+	}
 }
